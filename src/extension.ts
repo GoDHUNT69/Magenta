@@ -1,14 +1,17 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import { minimatch } from 'minimatch';
 
 // ── Decoration types ─────────────────────────────────────────────────────────
 const aiDecorationType = vscode.window.createTextEditorDecorationType({
     isWholeLine: true,
-    backgroundColor: 'rgba(255, 105, 180, 0.07)',
-    overviewRulerColor: 'rgba(255, 105, 180, 0.5)',
+    backgroundColor: 'rgba(223, 217, 220, 0.07)',
+    overviewRulerColor: 'rgba(240, 237, 238, 0.79)',
     overviewRulerLane: vscode.OverviewRulerLane.Right,
     after: {
         contentText: '  🤖',
-        color: 'rgba(255, 105, 180, 0.4)',
+        color: 'rgba(230, 222, 226, 0.77)',
         margin: '0 0 0 8px',
         fontStyle: 'italic',
     },
@@ -46,7 +49,35 @@ interface TrackedLine {
 const trackedLines = new Map<string, TrackedLine[]>();
 let statusBarItem: vscode.StatusBarItem;
 
-let nextChangeIsPaste = false;
+// ── Config flags ─────────────────────────────────────────────────────────────
+
+/**
+ * Set to true to flag snippet expansions (VS Code built-in snippets, Emmet,
+ * extension snippets) as AI-generated. Set to false to ignore them entirely.
+ *
+ * Snippets are natural coding shortcuts, so this defaults to false.
+ * Flip to true if your compliance policy requires tracking all non-human-typed
+ * insertions regardless of source.
+ */
+const FLAG_SNIPPETS_AS_AI = false;
+
+// ── Paste / snippet timing window ────────────────────────────────────────────
+
+/**
+ * Timestamp (ms) set when magenta.pasteIntercept fires.
+ * Any change event arriving within PASTE_WINDOW_MS of this timestamp is
+ * treated as a paste — this is robust to multi-event pastes (e.g. multi-cursor)
+ * where a boolean flag cleared at the top of the first event would miss the rest.
+ */
+let pasteInterceptTimestamp = 0;
+const PASTE_WINDOW_MS = 150;
+
+/**
+ * Same pattern for snippet intercept. Only active when FLAG_SNIPPETS_AS_AI
+ * is false — if it's true, snippets fall through to looksLikeGenerated anyway.
+ */
+let snippetInterceptTimestamp = 0;
+const SNIPPET_WINDOW_MS = 150;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -104,7 +135,7 @@ function buildDecorationRanges(
     const ranges: vscode.Range[] = [];
     let i = 0;
     while (i < lineNums.length) {
-        let start = lineNums[i];
+        const start = lineNums[i];
         let end = start;
         while (i + 1 < lineNums.length && lineNums[i + 1] === lineNums[i] + 1) {
             i++;
@@ -192,11 +223,45 @@ function matchesClipboard(text: string, clipboard: string): boolean {
     return false;
 }
 
-function classify(text: string, isPasteEvent: boolean, clipboard: string): 'ai' | 'paste' | null {
+/**
+ * Classify a text insert.
+ *
+ * Priority order:
+ *  1. pasteWindow   — keyboard paste (Ctrl+V / Shift+Insert) via timestamp window.
+ *                     Using a window instead of a boolean flag means multi-event
+ *                     pastes (multi-cursor, large files split across two change
+ *                     events) are all correctly classified as paste.
+ *  2. snippetWindow — insertSnippet intercept. Only suppresses (returns null)
+ *                     when FLAG_SNIPPETS_AS_AI is false. When true, falls through
+ *                     to looksLikeGenerated so snippets are flagged as AI.
+ *  3. matchesClipboard — catches right-click paste, drag-and-drop, middle-click.
+ *                     Runs before looksLikeGenerated so AI-structured text copied
+ *                     from an external source is always flagged as paste, not AI.
+ *  4. looksLikeGenerated — bulk structured insert with no other match → AI.
+ *  5. null          — ignore.
+ */
+function classify(
+    text: string,
+    now: number,
+    clipboard: string
+): 'ai' | 'paste' | null {
     if (text.trim().length === 0) { return null; }
-    if (isPasteEvent) { return 'paste'; }
+
+    // 1. Keyboard paste window
+    if (now - pasteInterceptTimestamp <= PASTE_WINDOW_MS) { return 'paste'; }
+
+    // 2. Snippet window — suppress or fall through depending on flag
+    if (now - snippetInterceptTimestamp <= SNIPPET_WINDOW_MS) {
+        if (!FLAG_SNIPPETS_AS_AI) { return null; }
+        // FLAG_SNIPPETS_AS_AI = true: fall through to structure detection below
+    }
+
+    // 3. Clipboard match — drag-and-drop / right-click paste
     if (matchesClipboard(text, clipboard)) { return 'paste'; }
+
+    // 4. Structure heuristic → AI
     if (looksLikeGenerated(text)) { return 'ai'; }
+
     return null;
 }
 
@@ -259,6 +324,362 @@ function adjustLinesForEdit(
         .filter((l): l is TrackedLine => l !== null);
 }
 
+// ── Persistence ──────────────────────────────────────────────────────────────
+
+/** Schema for per-file JSON metadata in .magenta/files/ */
+interface FileMetadata {
+    version: number;
+    lastUpdated: string;
+    totalLines: number;
+    aiPct: number;
+    pastePct: number;
+    flags: Array<{ line: number; type: 'ai' | 'paste'; timestamp: number }>;
+}
+
+/** Schema for .magenta/index.json */
+interface IndexFile {
+    version: number;
+    lastUpdated: string;
+    files: Record<string, { aiPct: number; pastePct: number; totalLines: number }>;
+    aggregate: {
+        totalFiles: number;
+        totalLines: number;
+        aiPct: number;
+        pastePct: number;
+    };
+}
+
+/** Schema for .magenta/config.json */
+interface MagentaConfig {
+    version: number;
+    flagSnippetsAsAI: boolean;
+    pasteWindowMs: number;
+    ignore: string[];
+}
+
+/**
+ * Owns all disk I/O for persistent flag storage.
+ * Creates and manages the .magenta/ folder structure at the workspace root.
+ */
+class PersistenceManager {
+    private readonly magentaDir: string;
+    private readonly wsRoot: string;
+    private saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    private config: MagentaConfig | null = null;
+
+    constructor(workspaceRoot: string) {
+        this.wsRoot = workspaceRoot;
+        this.magentaDir = path.join(workspaceRoot, '.magenta');
+        this._loadConfig();
+    }
+
+    // ── Path resolution ──────────────────────────────────────────────────────
+
+    /**
+     * Resolve .magenta/files/src/index.ts.json from a document URI string.
+     */
+    private fileMetaPath(docKey: string): string {
+        const filePath = vscode.Uri.parse(docKey).fsPath;
+        const relative = path.relative(this.wsRoot, filePath);
+        return path.join(this.magentaDir, 'files', relative + '.json');
+    }
+
+    /**
+     * Get the workspace-relative path for a document URI string.
+     */
+    private relativePath(docKey: string): string {
+        const filePath = vscode.Uri.parse(docKey).fsPath;
+        return path.relative(this.wsRoot, filePath).replace(/\\/g, '/');
+    }
+
+    // ── Config ───────────────────────────────────────────────────────────────
+
+    private _loadConfig(): void {
+        const configPath = path.join(this.magentaDir, 'config.json');
+        if (fs.existsSync(configPath)) {
+            try {
+                this.config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            } catch {
+                this.config = null;
+            }
+        }
+    }
+
+    /**
+     * Check if a file should be ignored based on config.json ignore patterns.
+     */
+    private shouldIgnore(relPath: string): boolean {
+        const patterns = this.config?.ignore ?? ['node_modules/**', 'dist/**'];
+        return patterns.some(p => minimatch(relPath, p));
+    }
+
+    // ── Save (debounced) ─────────────────────────────────────────────────────
+
+    /**
+     * Debounced save — don't hammer disk on every keystroke.
+     * Waits 500ms after the last call before actually writing.
+     */
+    saveFile(docKey: string, lines: TrackedLine[], doc: vscode.TextDocument): void {
+        const relPath = this.relativePath(docKey);
+        if (this.shouldIgnore(relPath)) { return; }
+
+        const existing = this.saveTimers.get(docKey);
+        if (existing) { clearTimeout(existing); }
+
+        this.saveTimers.set(docKey, setTimeout(() => {
+            this._writeFile(docKey, lines, doc);
+            this._updateIndex();
+            this.saveTimers.delete(docKey);
+        }, 500));
+    }
+
+    private _writeFile(docKey: string, lines: TrackedLine[], doc: vscode.TextDocument): void {
+        const p = this.fileMetaPath(docKey);
+        try {
+            fs.mkdirSync(path.dirname(p), { recursive: true });
+            const { aiPct, pastePct } = computePercents(doc, lines);
+            const payload: FileMetadata = {
+                version: 1,
+                lastUpdated: new Date().toISOString(),
+                totalLines: countDocumentLines(doc),
+                aiPct,
+                pastePct,
+                flags: lines.map(l => ({ line: l.line, type: l.type, timestamp: l.timestamp })),
+            };
+            fs.writeFileSync(p, JSON.stringify(payload, null, 2));
+        } catch {
+            // Disk write failed — silently continue (extension still works in-memory)
+        }
+    }
+
+    // ── Load ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Load previously persisted flags for a document.
+     * Returns null if no file exists or if the data is corrupt/incompatible.
+     */
+    loadFile(docKey: string): TrackedLine[] | null {
+        const p = this.fileMetaPath(docKey);
+        if (!fs.existsSync(p)) { return null; }
+        try {
+            const raw: FileMetadata = JSON.parse(fs.readFileSync(p, 'utf8'));
+            if (raw.version !== 1) { return null; }
+            return raw.flags.map(f => ({
+                line: f.line,
+                type: f.type,
+                timestamp: f.timestamp,
+            }));
+        } catch {
+            return null;
+        }
+    }
+
+    // ── Clear ────────────────────────────────────────────────────────────────
+
+    /**
+     * Remove persisted flags for a document and update the index.
+     */
+    clearFile(docKey: string): void {
+        const p = this.fileMetaPath(docKey);
+        try {
+            if (fs.existsSync(p)) { fs.unlinkSync(p); }
+        } catch {
+            // Ignore — file may already be gone
+        }
+        this._updateIndex();
+    }
+
+    // ── Rename / Delete ──────────────────────────────────────────────────────
+
+    /**
+     * Move the persisted metadata file when a source file is renamed.
+     */
+    renameFile(oldUri: string, newUri: string): void {
+        const oldPath = this.fileMetaPath(oldUri);
+        const newPath = this.fileMetaPath(newUri);
+        try {
+            if (fs.existsSync(oldPath)) {
+                fs.mkdirSync(path.dirname(newPath), { recursive: true });
+                fs.renameSync(oldPath, newPath);
+                this._cleanEmptyDirs(path.dirname(oldPath));
+                this._updateIndex();
+            }
+        } catch {
+            // Best-effort — old file becomes orphaned, which is harmless
+        }
+    }
+
+    /**
+     * Remove the persisted metadata file when a source file is deleted.
+     */
+    deleteFile(docUri: string): void {
+        const p = this.fileMetaPath(docUri);
+        try {
+            if (fs.existsSync(p)) {
+                fs.unlinkSync(p);
+                this._cleanEmptyDirs(path.dirname(p));
+                this._updateIndex();
+            }
+        } catch {
+            // Ignore
+        }
+    }
+
+    // ── Index ────────────────────────────────────────────────────────────────
+
+    /**
+     * Walk all *.json in .magenta/files/ and rebuild index.json with
+     * per-file stats and project-wide aggregates.
+     */
+    private _updateIndex(): void {
+        const filesDir = path.join(this.magentaDir, 'files');
+        if (!fs.existsSync(filesDir)) { return; }
+
+        const index: IndexFile = {
+            version: 1,
+            lastUpdated: new Date().toISOString(),
+            files: {},
+            aggregate: { totalFiles: 0, totalLines: 0, aiPct: 0, pastePct: 0 },
+        };
+
+        let totalAiLines = 0;
+        let totalPasteLines = 0;
+
+        this._walkJsonFiles(filesDir, (filePath) => {
+            try {
+                const raw: FileMetadata = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                if (raw.version !== 1) { return; }
+
+                // Derive workspace-relative path from the .magenta/files/ path
+                const relToFiles = path.relative(filesDir, filePath);
+                // Remove trailing .json to get the original relative path
+                const relPath = relToFiles.replace(/\.json$/, '').replace(/\\/g, '/');
+
+                index.files[relPath] = {
+                    aiPct: raw.aiPct,
+                    pastePct: raw.pastePct,
+                    totalLines: raw.totalLines,
+                };
+
+                index.aggregate.totalFiles++;
+                index.aggregate.totalLines += raw.totalLines;
+
+                // Count actual flagged lines for aggregate calculation
+                const aiSet = new Set(raw.flags.filter(f => f.type === 'ai').map(f => f.line));
+                const pasteSet = new Set(raw.flags.filter(f => f.type === 'paste').map(f => f.line));
+                totalAiLines += aiSet.size;
+                totalPasteLines += pasteSet.size;
+            } catch {
+                // Skip corrupt files
+            }
+        });
+
+        // Compute aggregate percentages
+        const totalLines = index.aggregate.totalLines;
+        if (totalLines > 0) {
+            index.aggregate.aiPct = Math.min(100, Math.round((totalAiLines / totalLines) * 100));
+            index.aggregate.pastePct = Math.min(100, Math.round((totalPasteLines / totalLines) * 100));
+        }
+
+        try {
+            fs.writeFileSync(
+                path.join(this.magentaDir, 'index.json'),
+                JSON.stringify(index, null, 2)
+            );
+        } catch {
+            // Ignore write failure
+        }
+    }
+
+    /**
+     * Recursively walk a directory and invoke callback for every .json file.
+     */
+    private _walkJsonFiles(dir: string, callback: (filePath: string) => void): void {
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                this._walkJsonFiles(fullPath, callback);
+            } else if (entry.isFile() && entry.name.endsWith('.json')) {
+                callback(fullPath);
+            }
+        }
+    }
+
+    /**
+     * Remove empty directories up the tree (cleanup after delete/rename).
+     * Stops at the .magenta/files/ root.
+     */
+    private _cleanEmptyDirs(dir: string): void {
+        const filesDir = path.join(this.magentaDir, 'files');
+        let current = dir;
+        while (current !== filesDir && current.startsWith(filesDir)) {
+            try {
+                const contents = fs.readdirSync(current);
+                if (contents.length === 0) {
+                    fs.rmdirSync(current);
+                    current = path.dirname(current);
+                } else {
+                    break;
+                }
+            } catch {
+                break;
+            }
+        }
+    }
+
+    // ── .gitignore ───────────────────────────────────────────────────────────
+
+    /**
+     * On first activation when .magenta/ doesn't exist yet, prompt the user
+     * about adding it to .gitignore. The answer is stored in workspaceState
+     * so the prompt only appears once per workspace.
+     */
+    async ensureGitignore(context: vscode.ExtensionContext): Promise<void> {
+        // Only prompt once per workspace
+        const prompted = context.workspaceState.get<boolean>('magenta.gitignorePrompted');
+        if (prompted) { return; }
+
+        // Only prompt if .magenta/ doesn't exist yet (first run)
+        if (fs.existsSync(this.magentaDir)) { return; }
+
+        const gitignorePath = path.join(this.wsRoot, '.gitignore');
+
+        // Check if .gitignore already contains .magenta/
+        if (fs.existsSync(gitignorePath)) {
+            const content = fs.readFileSync(gitignorePath, 'utf8');
+            if (content.includes('.magenta')) {
+                await context.workspaceState.update('magenta.gitignorePrompted', true);
+                return;
+            }
+        }
+
+        const choice = await vscode.window.showInformationMessage(
+            'Magenta will create a .magenta/ folder to persist flag data. Add it to .gitignore?',
+            'Yes — ignore it', 'No — commit it', 'Remind me later'
+        );
+
+        if (choice === 'Yes — ignore it') {
+            try {
+                fs.appendFileSync(gitignorePath, '\n# Magenta audit data\n.magenta/\n');
+                vscode.window.showInformationMessage('✅ Added .magenta/ to .gitignore');
+            } catch {
+                vscode.window.showWarningMessage('Could not write to .gitignore');
+            }
+            await context.workspaceState.update('magenta.gitignorePrompted', true);
+        } else if (choice === 'No — commit it') {
+            await context.workspaceState.update('magenta.gitignorePrompted', true);
+            await context.workspaceState.update('magenta.commitFolder', true);
+        }
+        // 'Remind me later' or dismissed — don't update state, prompt again next time
+    }
+}
+
 // ── Activation ───────────────────────────────────────────────────────────────
 export function activate(context: vscode.ExtensionContext): void {
     vscode.window.showInformationMessage('🛡️ Magenta active');
@@ -267,16 +688,43 @@ export function activate(context: vscode.ExtensionContext): void {
     statusBarItem.command = 'aiDetector.showSummary';
     context.subscriptions.push(statusBarItem);
 
+    // ── Init persistence (only when a workspace is open) ─────────────────────
+    let persistence: PersistenceManager | null = null;
+    if (vscode.workspace.workspaceFolders?.length) {
+        const wsRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
+        persistence = new PersistenceManager(wsRoot);
+        persistence.ensureGitignore(context); // prompt user once (async, non-blocking)
+    }
+
     // ── Paste intercept ──────────────────────────────────────────────────────
+    //
+    // Records a timestamp instead of setting a boolean flag. Any change event
+    // arriving within PASTE_WINDOW_MS is treated as paste — this correctly
+    // handles multi-cursor and multi-event pastes where a boolean cleared at
+    // the top of the first event would miss subsequent change events.
     const pasteInterceptCommand = vscode.commands.registerCommand(
         'magenta.pasteIntercept',
         async () => {
-            nextChangeIsPaste = true;
-            try {
-                await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
-            } finally {
-                nextChangeIsPaste = false;
-            }
+            pasteInterceptTimestamp = Date.now();
+            await vscode.commands.executeCommand('editor.action.clipboardPasteAction');
+        }
+    );
+
+    // ── Snippet intercept ─────────────────────────────────────────────────────
+    //
+    // Hooks editor.action.insertSnippet so snippet expansions are not mistaken
+    // for AI-generated code. When FLAG_SNIPPETS_AS_AI is false (default), any
+    // change event within SNIPPET_WINDOW_MS is silently ignored. When true,
+    // the window has no effect and snippets fall through to looksLikeGenerated.
+    //
+    // Keybinding for Tab-triggered snippets is handled via package.json just
+    // like the paste intercept. Right-click → Insert Snippet and language-server
+    // completion snippets that call insertSnippet directly are also caught here.
+    const snippetInterceptCommand = vscode.commands.registerCommand(
+        'magenta.snippetIntercept',
+        async () => {
+            snippetInterceptTimestamp = Date.now();
+            await vscode.commands.executeCommand('editor.action.insertSnippet');
         }
     );
 
@@ -288,8 +736,9 @@ export function activate(context: vscode.ExtensionContext): void {
             );
             if (!editor) { return; }
 
-            const isPasteEvent = nextChangeIsPaste;
-            nextChangeIsPaste = false;
+            // Snapshot the time once per event batch so all changes in this
+            // batch are evaluated against the same moment.
+            const now = Date.now();
 
             let clipboard = '';
             try { clipboard = await vscode.env.clipboard.readText(); } catch { /* ignore */ }
@@ -300,13 +749,11 @@ export function activate(context: vscode.ExtensionContext): void {
             for (const change of event.contentChanges) {
                 const text = change.text;
 
-                // Always adjust first — this handles deletions and shifts
-                // before we potentially add new tracked lines for this change.
                 lines = adjustLinesForEdit(lines, change);
 
                 if (!text || text.trim().length === 0) { continue; }
 
-                const kind = classify(text, isPasteEvent, clipboard);
+                const kind = classify(text, now, clipboard);
                 if (kind === null) { continue; }
 
                 // Fix for Issue 3 (gap between non-adjacent multi-cursor inserts flagged):
@@ -354,14 +801,32 @@ export function activate(context: vscode.ExtensionContext): void {
 
             trackedLines.set(key, lines);
             reapplyDecorations(editor);
+
+            // Persist to disk (debounced)
+            persistence?.saveFile(key, lines, event.document);
         }
     );
 
     // ── Editor focus change ──────────────────────────────────────────────────
     const editorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(
         (editor) => {
-            if (editor) { reapplyDecorations(editor); }
-            else { statusBarItem.hide(); }
+            if (!editor) {
+                statusBarItem.hide();
+                return;
+            }
+
+            const key = getDocKey(editor.document);
+
+            // Restore from disk if this file has no in-memory state (fresh session)
+            if (!trackedLines.has(key) && persistence) {
+                const saved = persistence.loadFile(key);
+                if (saved && saved.length > 0) {
+                    trackedLines.set(key, saved);
+                    vscode.window.setStatusBarMessage('Magenta: restored flags from .magenta/', 2000);
+                }
+            }
+
+            reapplyDecorations(editor);
         }
     );
 
@@ -371,8 +836,10 @@ export function activate(context: vscode.ExtensionContext): void {
         () => {
             const editor = vscode.window.activeTextEditor;
             if (!editor) { return; }
-            trackedLines.set(getDocKey(editor.document), []);
+            const key = getDocKey(editor.document);
+            trackedLines.set(key, []);
             reapplyDecorations(editor);
+            persistence?.clearFile(key);
             vscode.window.showInformationMessage('✅ Magenta: highlights cleared');
         }
     );
@@ -408,18 +875,56 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     );
 
+    // ── File rename handler ──────────────────────────────────────────────────
+    const renameDisposable = vscode.workspace.onDidRenameFiles((event) => {
+        for (const { oldUri, newUri } of event.files) {
+            // Update in-memory state
+            const oldKey = oldUri.toString();
+            const newKey = newUri.toString();
+            const existingLines = trackedLines.get(oldKey);
+            if (existingLines) {
+                trackedLines.set(newKey, existingLines);
+                trackedLines.delete(oldKey);
+            }
+            // Update persisted state
+            persistence?.renameFile(oldKey, newKey);
+        }
+    });
+
+    // ── File delete handler ──────────────────────────────────────────────────
+    const deleteDisposable = vscode.workspace.onDidDeleteFiles((event) => {
+        for (const uri of event.files) {
+            const key = uri.toString();
+            trackedLines.delete(key);
+            persistence?.deleteFile(key);
+        }
+    });
+
     context.subscriptions.push(
         pasteInterceptCommand,
+        snippetInterceptCommand,
         changeDisposable,
         editorChangeDisposable,
         clearCommand,
         summaryCommand,
+        renameDisposable,
+        deleteDisposable,
         aiDecorationType,
         pasteDecorationType
     );
 
+    // Restore state for the currently active editor on activation
     if (vscode.window.activeTextEditor) {
-        reapplyDecorations(vscode.window.activeTextEditor);
+        const editor = vscode.window.activeTextEditor;
+        const key = getDocKey(editor.document);
+        if (!trackedLines.has(key) && persistence) {
+            const saved = persistence.loadFile(key);
+            if (saved && saved.length > 0) {
+                trackedLines.set(key, saved);
+                vscode.window.setStatusBarMessage('Magenta: restored flags from .magenta/', 2000);
+            }
+        }
+        reapplyDecorations(editor);
     }
 }
 

@@ -1,36 +1,97 @@
 {
   "name": "magenta",
   "displayName": "Magenta",
-  "description": "AI audit and Compliance",
-  "version": "0.0.1",
+  "description": "AI audit and compliance tool — flags AI-generated and pasted code inline.",
+  "version": "0.1.0",
   "engines": {
     "vscode": "^1.110.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Themes"
   ],
   "activationEvents": [
-    "*"
+    "onStartupFinished",
+    "onCommand:magenta.pasteIntercept",
+    "onCommand:magenta.snippetIntercept"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "themes": [
+      {
+        "label": "Magenta",
+        "uiTheme": "vs-dark",
+        "path": "./themes/magenta.json"
+      },
+      {
+        "label": "Magenta Noir",
+        "uiTheme": "vs-dark",
+        "path": "./themes/magenta-noir.json"
+      },
+      {
+        "label": "Magenta Contrast+",
+        "uiTheme": "vs-dark",
+        "path": "./themes/magenta-contrast.json"
+      },
+      {
+        "label": "Magenta Cyber",
+        "uiTheme": "vs-dark",
+        "path": "./themes/magenta-cyber.json"
+      }
+    ],
     "commands": [
       {
         "command": "aiDetector.clearHighlights",
-        "title": "AI Detector: Clear All Highlights"
+        "title": "Magenta: Clear Highlights"
       },
       {
         "command": "aiDetector.showSummary",
-        "title": "AI Detector: Show Summary"
+        "title": "Magenta: Show Summary"
       }
     ],
     "keybindings": [
+      {
+        "command": "magenta.pasteIntercept",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "magenta.pasteIntercept",
+        "key": "shift+insert",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "magenta.snippetIntercept",
+        "key": "tab",
+        "when": "editorTextFocus && hasSnippetCompletions"
+      },
       {
         "command": "aiDetector.clearHighlights",
         "key": "ctrl+shift+alt+c",
         "mac": "cmd+shift+alt+c"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Magenta",
+      "properties": {
+        "magenta.flagSnippetsAsAI": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, snippet expansions (Emmet, VS Code built-ins, extension snippets) are flagged as AI-generated."
+        },
+        "magenta.pasteWindowMs": {
+          "type": "number",
+          "default": 150,
+          "description": "Millisecond window after a paste intercept during which change events are classified as paste."
+        },
+        "magenta.snippetWindowMs": {
+          "type": "number",
+          "default": 150,
+          "description": "Millisecond window after a snippet intercept during which change events are suppressed."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
@@ -47,6 +108,7 @@
     "test": "vscode-test"
   },
   "devDependencies": {
+    "@types/minimatch": "^5.1.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.19.15",
     "@types/vscode": "^1.110.0",
@@ -61,5 +123,8 @@
   "overrides": {
     "diff": "^8.0.3",
     "serialize-javascript": "^7.0.5"
+  },
+  "dependencies": {
+    "minimatch": "^10.2.5"
   }
 }
