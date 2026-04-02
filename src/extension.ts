@@ -45,39 +45,61 @@ interface TrackedLine {
     timestamp: number;
 }
 
+interface AuditedFile {
+    relativePath: string;
+    addedAt: string;       // ISO 8601
+}
+
+interface AuditEvent {
+    event: 'file-opened';
+    file: string;          // workspace-relative path
+    timestamp: string;     // ISO 8601
+    sessionId: string;     // generated once at activate()
+    source: 'user' | 'programmatic';
+    activeEditor: string | null;
+    openEditors: string[];
+}
+
+interface AuditConfig {
+    version: 1;
+    files: Record<string, AuditedFile>; // key = relativePath
+}
+
 /** Per-document state: a flat array of per-line entries. */
 const trackedLines = new Map<string, TrackedLine[]>();
 let statusBarItem: vscode.StatusBarItem;
+let outputChannel: vscode.OutputChannel;
 
-// ── Config flags ─────────────────────────────────────────────────────────────
+// ── Dynamic config ───────────────────────────────────────────────────────────
 
 /**
- * Set to true to flag snippet expansions (VS Code built-in snippets, Emmet,
- * extension snippets) as AI-generated. Set to false to ignore them entirely.
- *
- * Snippets are natural coding shortcuts, so this defaults to false.
- * Flip to true if your compliance policy requires tracking all non-human-typed
- * insertions regardless of source.
+ * Reads settings from VS Code's configuration at call time.
+ * This means changes in Settings UI take effect immediately — no reload needed.
  */
-const FLAG_SNIPPETS_AS_AI = false;
+function getConfig() {
+    const cfg = vscode.workspace.getConfiguration('magenta');
+    return {
+        flagSnippetsAsAI: cfg.get<boolean>('flagSnippetsAsAI', false),
+        pasteWindowMs:    cfg.get<number>('pasteWindowMs', 150),
+        snippetWindowMs:  cfg.get<number>('snippetWindowMs', 150),
+    };
+}
 
 // ── Paste / snippet timing window ────────────────────────────────────────────
 
 /**
  * Timestamp (ms) set when magenta.pasteIntercept fires.
- * Any change event arriving within PASTE_WINDOW_MS of this timestamp is
+ * Any change event arriving within the configured window of this timestamp is
  * treated as a paste — this is robust to multi-event pastes (e.g. multi-cursor)
  * where a boolean flag cleared at the top of the first event would miss the rest.
  */
 let pasteInterceptTimestamp = 0;
-const PASTE_WINDOW_MS = 150;
 
 /**
- * Same pattern for snippet intercept. Only active when FLAG_SNIPPETS_AS_AI
+ * Same pattern for snippet intercept. Only active when flagSnippetsAsAI
  * is false — if it's true, snippets fall through to looksLikeGenerated anyway.
  */
 let snippetInterceptTimestamp = 0;
-const SNIPPET_WINDOW_MS = 150;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -247,13 +269,15 @@ function classify(
 ): 'ai' | 'paste' | null {
     if (text.trim().length === 0) { return null; }
 
+    const cfg = getConfig();
+
     // 1. Keyboard paste window
-    if (now - pasteInterceptTimestamp <= PASTE_WINDOW_MS) { return 'paste'; }
+    if (now - pasteInterceptTimestamp <= cfg.pasteWindowMs) { return 'paste'; }
 
     // 2. Snippet window — suppress or fall through depending on flag
-    if (now - snippetInterceptTimestamp <= SNIPPET_WINDOW_MS) {
-        if (!FLAG_SNIPPETS_AS_AI) { return null; }
-        // FLAG_SNIPPETS_AS_AI = true: fall through to structure detection below
+    if (now - snippetInterceptTimestamp <= cfg.snippetWindowMs) {
+        if (!cfg.flagSnippetsAsAI) { return null; }
+        // flagSnippetsAsAI = true: fall through to structure detection below
     }
 
     // 3. Clipboard match — drag-and-drop / right-click paste
@@ -680,9 +704,101 @@ class PersistenceManager {
     }
 }
 
+// ── Session ID ───────────────────────────────────────────────────────────────
+
+function generateSessionId(): string {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+}
+
+// ── Audited File Manager ─────────────────────────────────────────────────────
+
+class AuditedFileManager {
+    private readonly configPath: string;
+    private config: AuditConfig = { version: 1, files: {} };
+
+    constructor(private readonly magentaDir: string) {
+        this.configPath = path.join(magentaDir, 'audited.json');
+        this.load();
+    }
+
+    private load(): void {
+        if (!fs.existsSync(this.configPath)) { return; }
+        try {
+            const raw = JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
+            if (raw.version === 1) { this.config = raw; }
+        } catch { /* corrupt — start fresh */ }
+    }
+
+    private save(): void {
+        try {
+            fs.mkdirSync(this.magentaDir, { recursive: true });
+            fs.writeFileSync(
+                this.configPath,
+                JSON.stringify(this.config, null, 2)
+            );
+        } catch (err) {
+            outputChannel?.appendLine(`Magenta: failed to save audited.json — ${err}`);
+        }
+    }
+
+    isAudited(relativePath: string): boolean {
+        return relativePath in this.config.files;
+    }
+
+    addFile(relativePath: string): void {
+        this.config.files[relativePath] = {
+            relativePath,
+            addedAt: new Date().toISOString()
+        };
+        this.save();
+    }
+
+    removeFile(relativePath: string): void {
+        delete this.config.files[relativePath];
+        this.save();
+    }
+
+    renameFile(oldRel: string, newRel: string): void {
+        if (!(oldRel in this.config.files)) { return; }
+        const entry = this.config.files[oldRel];
+        delete this.config.files[oldRel];
+        this.config.files[newRel] = { ...entry, relativePath: newRel };
+        this.save();
+    }
+
+    getAll(): AuditedFile[] {
+        return Object.values(this.config.files);
+    }
+}
+
+// ── Audit Logger ─────────────────────────────────────────────────────────────
+
+class AuditLogger {
+    private readonly logPath: string;
+
+    constructor(private readonly magentaDir: string) {
+        this.logPath = path.join(magentaDir, 'access-log.jsonl');
+    }
+
+    log(event: AuditEvent): void {
+        try {
+            fs.mkdirSync(path.dirname(this.logPath), { recursive: true });
+            fs.appendFileSync(this.logPath, JSON.stringify(event) + '\n');
+        } catch (err) {
+            outputChannel?.appendLine(`Magenta: failed to write audit log — ${err}`);
+        }
+    }
+}
+
 // ── Activation ───────────────────────────────────────────────────────────────
 export function activate(context: vscode.ExtensionContext): void {
     vscode.window.showInformationMessage('🛡️ Magenta active');
+
+    outputChannel = vscode.window.createOutputChannel('Magenta');
+    context.subscriptions.push(outputChannel);
 
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'aiDetector.showSummary';
@@ -690,10 +806,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // ── Init persistence (only when a workspace is open) ─────────────────────
     let persistence: PersistenceManager | null = null;
+    let auditedFiles: AuditedFileManager | null = null;
+    let auditLogger: AuditLogger | null = null;
+    const sessionId = generateSessionId();
+
     if (vscode.workspace.workspaceFolders?.length) {
         const wsRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
         persistence = new PersistenceManager(wsRoot);
         persistence.ensureGitignore(context); // prompt user once (async, non-blocking)
+
+        const magentaDir = path.join(wsRoot, '.magenta');
+        auditedFiles = new AuditedFileManager(magentaDir);
+        auditLogger  = new AuditLogger(magentaDir);
     }
 
     // ── Paste intercept ──────────────────────────────────────────────────────
@@ -888,6 +1012,11 @@ export function activate(context: vscode.ExtensionContext): void {
             }
             // Update persisted state
             persistence?.renameFile(oldKey, newKey);
+
+            // Update audit tracking
+            const oldRel = vscode.workspace.asRelativePath(oldUri, false);
+            const newRel = vscode.workspace.asRelativePath(newUri, false);
+            auditedFiles?.renameFile(oldRel, newRel);
         }
     });
 
@@ -897,6 +1026,129 @@ export function activate(context: vscode.ExtensionContext): void {
             const key = uri.toString();
             trackedLines.delete(key);
             persistence?.deleteFile(key);
+
+            // Clean up audit tracking
+            const rel = vscode.workspace.asRelativePath(uri, false);
+            auditedFiles?.removeFile(rel);
+        }
+    });
+
+    // ── Audit: onDidOpenTextDocument hook ─────────────────────────────────────
+    const auditDocOpenDisposable = vscode.workspace.onDidOpenTextDocument(doc => {
+        if (!auditedFiles || !auditLogger) { return; }
+
+        // skip virtual documents — git diffs, output panels, untitled files
+        if (doc.uri.scheme !== 'file') { return; }
+
+        const rel = vscode.workspace.asRelativePath(doc.uri, false);
+
+        // only track files the user has opted into
+        if (!auditedFiles.isAudited(rel)) { return; }
+
+        // a document is 'visibly' opened if it appears in an editor tab
+        // if it's in textDocuments but not visibleTextEditors,
+        // something else opened it programmatically
+        const openedVisibly = vscode.window.visibleTextEditors
+            .some(e => e.document.uri.toString() === doc.uri.toString());
+
+        const activeEditor = vscode.window.activeTextEditor
+            ? vscode.workspace.asRelativePath(
+                vscode.window.activeTextEditor.document.uri, false
+              )
+            : null;
+
+        const openEditors = vscode.workspace.textDocuments
+            .filter(d => d.uri.scheme === 'file')
+            .map(d => vscode.workspace.asRelativePath(d.uri, false));
+
+        auditLogger.log({
+            event: 'file-opened',
+            file: rel,
+            timestamp: new Date().toISOString(),
+            sessionId,
+            source: openedVisibly ? 'user' : 'programmatic',
+            activeEditor,
+            openEditors
+        });
+
+        // only surface a notification for programmatic opens
+        // user-opened files don't need a toast — that would be annoying
+        if (!openedVisibly) {
+            vscode.window.setStatusBarMessage(
+                `Magenta: audited file accessed programmatically — ${rel}`,
+                4000
+            );
+        }
+    });
+
+    // ── Audit: commands ──────────────────────────────────────────────────────
+    const fileDecorationEmitter = new vscode.EventEmitter<vscode.Uri>();
+
+    const addAuditCommand = vscode.commands.registerCommand(
+        'magenta.addAudit',
+        (uri: vscode.Uri) => {
+            if (!auditedFiles) { return; }
+            const rel = vscode.workspace.asRelativePath(uri, false);
+            auditedFiles.addFile(rel);
+            fileDecorationEmitter.fire(uri);
+            vscode.window.showInformationMessage(
+                `Magenta: now auditing access to ${rel}. ` +
+                `Events are logged to .magenta/access-log.jsonl`
+            );
+        }
+    );
+
+    const removeAuditCommand = vscode.commands.registerCommand(
+        'magenta.removeAudit',
+        (uri: vscode.Uri) => {
+            if (!auditedFiles) { return; }
+            const rel = vscode.workspace.asRelativePath(uri, false);
+            auditedFiles.removeFile(rel);
+            fileDecorationEmitter.fire(uri);
+            vscode.window.showInformationMessage(
+                `Magenta: stopped auditing ${rel}.`
+            );
+        }
+    );
+
+    // ── Audit: file decoration provider ──────────────────────────────────────
+    const fileDecorationProvider = vscode.window.registerFileDecorationProvider({
+        onDidChangeFileDecorations: fileDecorationEmitter.event,
+        provideFileDecoration(uri: vscode.Uri) {
+            if (!auditedFiles) { return undefined; }
+            const rel = vscode.workspace.asRelativePath(uri, false);
+            if (!auditedFiles.isAudited(rel)) { return undefined; }
+            return {
+                badge: 'A',
+                tooltip: 'Magenta: file access is being audited',
+                color: new vscode.ThemeColor('magenta.auditedFile')
+            };
+        }
+    });
+
+    // ── Audit: context key for explorer menu toggling ────────────────────────
+    const auditContextKeyDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
+        if (!editor || !auditedFiles) { return; }
+        const rel = vscode.workspace.asRelativePath(editor.document.uri, false);
+        vscode.commands.executeCommand(
+            'setContext',
+            'magenta.fileIsAudited',
+            auditedFiles.isAudited(rel)
+        );
+    });
+
+    // ── Workspace folder change handler ───────────────────────────────────────
+    // If a user opens VS Code without a workspace then adds a folder,
+    // re-initialize managers that were null.
+    const workspaceFolderDisposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        if (!persistence && vscode.workspace.workspaceFolders?.length) {
+            const wsRoot = vscode.workspace.workspaceFolders[0].uri.fsPath;
+            const magentaDir = path.join(wsRoot, '.magenta');
+            persistence = new PersistenceManager(wsRoot);
+            auditedFiles = new AuditedFileManager(magentaDir);
+            auditLogger  = new AuditLogger(magentaDir);
+            persistence.ensureGitignore(context);
+            outputChannel.appendLine('Magenta: workspace folder detected — managers initialized');
         }
     });
 
@@ -910,7 +1162,14 @@ export function activate(context: vscode.ExtensionContext): void {
         renameDisposable,
         deleteDisposable,
         aiDecorationType,
-        pasteDecorationType
+        pasteDecorationType,
+        auditDocOpenDisposable,
+        addAuditCommand,
+        removeAuditCommand,
+        fileDecorationProvider,
+        fileDecorationEmitter,
+        auditContextKeyDisposable,
+        workspaceFolderDisposable
     );
 
     // Restore state for the currently active editor on activation

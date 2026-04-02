@@ -3,12 +3,32 @@
   "displayName": "Magenta",
   "description": "AI audit and compliance tool — flags AI-generated and pasted code inline.",
   "version": "0.1.0",
+  "publisher": "YOUR_PUBLISHER_ID",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/magenta"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/magenta/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/magenta#readme",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#130b18",
+    "theme": "dark"
+  },
+  "keywords": [
+    "ai", "compliance", "audit", "code-detection",
+    "paste-detection", "eu-ai-act", "theme"
+  ],
   "engines": {
     "vscode": "^1.110.0"
   },
   "categories": [
     "Other",
-    "Themes"
+    "Themes",
+    "Linters"
   ],
   "activationEvents": [
     "onStartupFinished",
@@ -47,6 +67,39 @@
       {
         "command": "aiDetector.showSummary",
         "title": "Magenta: Show Summary"
+      },
+      {
+        "command": "magenta.addAudit",
+        "title": "Magenta: Audit file access"
+      },
+      {
+        "command": "magenta.removeAudit",
+        "title": "Magenta: Stop auditing file access"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "magenta.addAudit",
+          "when": "!magenta.fileIsAudited",
+          "group": "magenta@1"
+        },
+        {
+          "command": "magenta.removeAudit",
+          "when": "magenta.fileIsAudited",
+          "group": "magenta@1"
+        }
+      ]
+    },
+    "colors": [
+      {
+        "id": "magenta.auditedFile",
+        "description": "Color for files being audited by Magenta",
+        "defaults": {
+          "dark": "#c084fc",
+          "light": "#9333ea",
+          "highContrast": "#ffffff"
+        }
       }
     ],
     "keybindings": [
