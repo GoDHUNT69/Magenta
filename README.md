@@ -1,93 +1,125 @@
-# Magenta
+<p align="center">
+  <img src="images/icon.png" alt="Magenta Logo" width="96" />
+</p>
 
-Magenta is a VS Code extension for tracking AI-generated and pasted code as you work. It highlights suspicious edits inline, keeps per-file percentages in the status bar, and can audit when selected files are opened inside VS Code.
+<h1 align="center">Magenta</h1>
+
+<p align="center">
+  Track AI-generated and pasted code inline, right inside VS Code.
+</p>
+
+<p align="center">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" />
+  <img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-extension-purple.svg" />
+</p>
+
+---
+
+Magenta watches your editor as you work and flags inserted content it identifies as AI-generated or pasted. Flagged lines are highlighted inline and tracked across reloads — giving you visibility into your codebase's composition without interrupting your flow.
+
+> **Note:** Magenta is heuristic-based and does not claim authorship with certainty. It's a tool for visibility and auditing, not a substitute for review or source attribution.
+
+---
 
 ## Features
 
-### Inline AI and paste highlighting
+### Inline highlighting
 
-Magenta watches text changes in the editor and classifies inserted content as:
+Magenta intercepts text changes and classifies inserted content as:
 
-- `ai` when the content matches Magenta's structural heuristics for generated code
-- `paste` when the content matches clipboard or paste-intercept signals
+- **`ai`** — matched Magenta's structural heuristics for generated code (size, indentation consistency, trailing spaces, character density)
+- **`paste`** — matched clipboard or paste-intercept signals
 
-Flagged lines are highlighted in the editor and overview ruler so they stay visible without taking over the whole UI.
+Flagged lines are highlighted in the editor and the overview ruler so they stay visible without taking over the UI.
 
-### Live file summary
+### Live status bar
 
-The status bar shows the current file's estimated mix of flagged content:
+The status bar shows the active file's estimated content mix at a glance:
 
-```text
+```
 $(robot) 34% AI  $(clippy) 12% Paste
 ```
 
 When the file is clean, Magenta shows a simple clean state instead.
 
-### Sidebar controls
+### Sidebar panel
 
-The Magenta activity bar view includes:
+The Magenta activity bar view gives you quick access to:
 
-- current-file AI and paste percentages
-- a quick summary action
-- one-click clear for the active file
-- highlight visibility toggle
-- theme selection for highlight styles
-- a list of audited files
+- AI and paste percentages for the current file
+- A one-click **Summary** action
+- **Clear** highlights for the active file
+- **Toggle** highlight visibility
+- **Theme** selector for highlight styles
+- A list of audited files
 
-### File access audit
+### File access auditing
 
-You can right-click a file in the Explorer and choose:
+Right-click any file in the Explorer to start or stop auditing it:
 
-- `Magenta: Audit file access`
-- `Magenta: Stop auditing file access`
+- **Magenta: Audit file access** — begins logging open events
+- **Magenta: Stop auditing file access** — removes the file from the audit list
 
-For audited files, Magenta writes open events to `.magenta/access-log.jsonl` and marks the file in the Explorer with an `A` badge. Events are labeled as either `user` or `programmatic` depending on whether the file opened visibly in an editor.
+Audited files are marked with an `A` badge in the Explorer. Open events are written to `.magenta/access-log.jsonl` and labeled `user` or `programmatic` depending on whether the file opened visibly in an editor tab.
 
 ### Persistent metadata
 
-Magenta stores tracked line metadata under `.magenta/` so highlights survive reloads and restarts. It also maintains an aggregate index for workspace-level summaries.
+Tracked line metadata is stored under `.magenta/` and survives reloads and restarts. An aggregate index keeps workspace-level summaries up to date.
+
+---
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
+| Command | Description |
+|---|---|
 | `Magenta: Clear Highlights` | Remove tracked flags from the active file |
 | `Magenta: Show Summary` | Show AI and paste counts for the active file |
 | `Magenta: Toggle Highlights` | Show or hide decorations |
 | `Magenta: Choose Highlight Theme` | Switch highlight presentation |
-| `Magenta: Audit file access` | Start auditing a file from the Explorer |
+| `Magenta: Audit file access` | Start auditing a file (Explorer context menu) |
 | `Magenta: Stop auditing file access` | Remove a file from the audit list |
+
+---
 
 ## Settings
 
-Magenta contributes these settings:
-
 | Setting | Default | Description |
-| --- | --- | --- |
+|---|---|---|
 | `magenta.flagSnippetsAsAI` | `false` | Treat snippet insertions as AI-generated when they fall inside the snippet detection window |
-| `magenta.pasteWindowMs` | `150` | Time window after paste interception used to classify inserted content as paste |
-| `magenta.snippetWindowMs` | `150` | Time window after snippet interception used to suppress or classify snippet content |
+| `magenta.pasteWindowMs` | `150` | Time window (ms) after paste interception used to classify content as paste |
+| `magenta.snippetWindowMs` | `150` | Time window (ms) after snippet interception used to suppress or classify snippet content |
+
+---
 
 ## How detection works
 
-Magenta is heuristic-based. It does not claim authorship with certainty. The current implementation combines:
+Magenta combines several signals to classify inserted content:
 
-- explicit paste interception through keybindings
-- clipboard matching for inserted content
-- a generated-code heuristic based on size, indentation consistency, trailing spaces, and character density
-- line-drift correction so tracked ranges move with edits
+- **Explicit paste interception** via keybindings
+- **Clipboard matching** for inserted content
+- **Generated-code heuristics** based on block size, indentation consistency, trailing spaces, and character density
+- **Line-drift correction** so tracked ranges move accurately with subsequent edits
 
-This makes Magenta useful for visibility and auditing, but not a substitute for policy, review, or source attribution.
+No model calls are made. Everything runs locally and offline.
+
+---
 
 ## Workspace files
 
-Magenta may create these files in the workspace:
+Magenta may create the following files in your workspace:
 
-- `.magenta/files/**/*.json` for per-file tracked lines
-- `.magenta/index.json` for aggregate workspace statistics
-- `.magenta/audited.json` for the audited file list
-- `.magenta/access-log.jsonl` for audit events
-- `.magenta/config.json` when custom ignore patterns are used
+```
+.magenta/
+├── files/**/*.json       # Per-file tracked line metadata
+├── index.json            # Aggregate workspace statistics
+├── audited.json          # Audited file list
+├── access-log.jsonl      # Audit open events
+└── config.json           # Custom ignore patterns (when configured)
+```
+
+Add `.magenta/` to your `.gitignore` if you don't want to commit this data.
+
+---
 
 ## Development
 
@@ -96,19 +128,24 @@ npm install
 npm run compile
 ```
 
-Useful scripts:
-
-- `npm run watch` for development builds
-- `npm run lint` for ESLint
-- `npm run check-types` for TypeScript validation
-- `npm test` for the VS Code test runner
+| Script | Purpose |
+|---|---|
+| `npm run watch` | Development builds with file watching |
+| `npm run lint` | ESLint |
+| `npm run check-types` | TypeScript validation |
+| `npm test` | VS Code test runner |
 
 Press `F5` in VS Code to launch an Extension Development Host.
 
+---
+
 ## Documentation
 
-Additional project documentation lives in [`docs/FEATURES.md`](docs/FEATURES.md) and [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
+- [`docs/FEATURES.md`](docs/FEATURES.md) — detailed feature documentation
+- [`docs/TECHNICAL.md`](docs/TECHNICAL.md) — architecture and internals
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)
