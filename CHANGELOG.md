@@ -4,7 +4,7 @@ All notable changes to the Magenta extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [0.1.0] - 2025-04-XX
+## [0.1.0] - 2025-04-03
 
 ### Added
 - Real-time AI-generated code detection with inline highlighting (🤖 glyph + pink background)

@@ -2,25 +2,30 @@
   "name": "magenta",
   "displayName": "Magenta",
   "description": "AI audit and compliance tool — flags AI-generated and pasted code inline.",
-  "version": "0.1.0",
-  "publisher": "YOUR_PUBLISHER_ID",
+  "version": "0.2.0",
+  "publisher": "GoDHUNT69",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/magenta"
+    "url": "https://github.com/GoDHUNT69/Magenta"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_USERNAME/magenta/issues"
+    "url": "https://github.com/GoDHUNT69/Magenta/issues"
   },
-  "homepage": "https://github.com/YOUR_USERNAME/magenta#readme",
+  "homepage": "https://github.com/GoDHUNT69/Magenta#readme",
   "icon": "images/icon.png",
   "galleryBanner": {
     "color": "#130b18",
     "theme": "dark"
   },
   "keywords": [
-    "ai", "compliance", "audit", "code-detection",
-    "paste-detection", "eu-ai-act", "theme"
+    "ai",
+    "compliance",
+    "audit",
+    "code-detection",
+    "paste-detection",
+    "eu-ai-act",
+    "theme"
   ],
   "engines": {
     "vscode": "^1.110.0"
@@ -31,9 +36,7 @@
     "Linters"
   ],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:magenta.pasteIntercept",
-    "onCommand:magenta.snippetIntercept"
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -59,35 +62,75 @@
         "path": "./themes/magenta-cyber.json"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "magenta-panel",
+          "title": "Magenta",
+          "icon": "images/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "magenta-panel": [
+        {
+          "type": "webview",
+          "id": "magenta.sidebar",
+          "name": "Magenta",
+          "icon": "images/icon.png"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "aiDetector.clearHighlights",
-        "title": "Magenta: Clear Highlights"
+        "title": "Magenta: Clear Highlights",
+        "icon": "$(trash)"
       },
       {
         "command": "aiDetector.showSummary",
-        "title": "Magenta: Show Summary"
+        "title": "Magenta: Show Summary",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "magenta.toggleHighlights",
+        "title": "Magenta: Toggle Highlights",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "magenta.setTheme",
+        "title": "Magenta: Choose Highlight Theme",
+        "icon": "$(symbol-color)"
       },
       {
         "command": "magenta.addAudit",
-        "title": "Magenta: Audit file access"
+        "title": "Magenta: Audit file access",
+        "icon": "$(shield)"
       },
       {
         "command": "magenta.removeAudit",
-        "title": "Magenta: Stop auditing file access"
+        "title": "Magenta: Stop auditing file access",
+        "icon": "$(shield-x)"
       }
     ],
     "menus": {
       "explorer/context": [
         {
           "command": "magenta.addAudit",
-          "when": "!magenta.fileIsAudited",
+          "when": "!magenta.fileIsAudited && resourceScheme == file",
           "group": "magenta@1"
         },
         {
           "command": "magenta.removeAudit",
-          "when": "magenta.fileIsAudited",
+          "when": "magenta.fileIsAudited && resourceScheme == file",
           "group": "magenta@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "magenta.toggleHighlights",
+          "group": "navigation@99",
+          "when": "editorIsOpen"
         }
       ]
     },
@@ -122,7 +165,13 @@
       {
         "command": "aiDetector.clearHighlights",
         "key": "ctrl+shift+alt+c",
-        "mac": "cmd+shift+alt+c"
+        "mac": "cmd+shift+alt+c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "magenta.toggleHighlights",
+        "key": "ctrl+shift+alt+h",
+        "mac": "cmd+shift+alt+h"
       }
     ],
     "configuration": {
@@ -136,11 +185,15 @@
         "magenta.pasteWindowMs": {
           "type": "number",
           "default": 150,
+          "minimum": 50,
+          "maximum": 1000,
           "description": "Millisecond window after a paste intercept during which change events are classified as paste."
         },
         "magenta.snippetWindowMs": {
           "type": "number",
           "default": 150,
+          "minimum": 50,
+          "maximum": 1000,
           "description": "Millisecond window after a snippet intercept during which change events are suppressed."
         }
       }

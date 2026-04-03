@@ -1,163 +1,114 @@
-# 🟣 Magenta — AI & Paste Code Auditor for VS Code
+# Magenta
 
-> **Know exactly how much of your codebase was written by you.**
+Magenta is a VS Code extension for tracking AI-generated and pasted code as you work. It highlights suspicious edits inline, keeps per-file percentages in the status bar, and can audit when selected files are opened inside VS Code.
 
-Magenta is a lightweight VS Code extension that detects AI-generated and pasted code in real time, highlights it inline, and keeps a running percentage of how much of each file came from a human versus a tool.
+## Features
 
-Built for developers who care about code ownership, compliance, and audit trails — especially with EU AI Act enforcement approaching and organizations tightening policies around AI-assisted code.
+### Inline AI and paste highlighting
 
----
+Magenta watches text changes in the editor and classifies inserted content as:
 
-## What Magenta Does
+- `ai` when the content matches Magenta's structural heuristics for generated code
+- `paste` when the content matches clipboard or paste-intercept signals
 
-### 🎨 Subtle Inline Highlighting
+Flagged lines are highlighted in the editor and overview ruler so they stay visible without taking over the whole UI.
 
-Flagged lines get a barely-there background wash and a glyph so you can see them without visual friction:
+### Live file summary
 
-| Type | Indicator | Glyph |
-|------|-----------|-------|
-| AI-generated | Soft pink background (7% opacity) | 🤖 |
-| Pasted code | Soft amber background (6% opacity) | 📋 |
+The status bar shows the current file's estimated mix of flagged content:
 
-Both types also mark the overview ruler (the thin strip on the right edge of the editor) — pink for AI, amber for paste — so you can spot flagged regions at a glance without scrolling.
-
-### 📊 Live Status Bar Percentage
-
-The status bar updates on every edit:
-
-```
-🤖 34% AI   📋 12% Paste
+```text
+$(robot) 34% AI  $(clippy) 12% Paste
 ```
 
-Percentages are calculated against non-blank lines. When no flagged content exists, the status bar reads `✓ Magenta: 0% AI`.
+When the file is clean, Magenta shows a simple clean state instead.
 
-### 🔍 File Access Audit
+### Sidebar controls
 
-Right-click any file in the explorer → **Magenta: Audit file access** to start tracking when and how it is opened. Every open event is logged to `.magenta/access-log.jsonl` with a `source` field:
+The Magenta activity bar view includes:
 
-- **`user`** — you opened the file yourself (it appeared in a visible editor tab)
-- **`programmatic`** — another extension or process opened it silently
+- current-file AI and paste percentages
+- a quick summary action
+- one-click clear for the active file
+- highlight visibility toggle
+- theme selection for highlight styles
+- a list of audited files
 
-Programmatic opens trigger a brief status bar notification. This is the start of the compliance story — you can see exactly when an AI agent read a sensitive file during a session.
+### File access audit
 
-Audited files display a purple **A** badge in the explorer.
+You can right-click a file in the Explorer and choose:
 
-### 💾 Persistent Flag Storage
+- `Magenta: Audit file access`
+- `Magenta: Stop auditing file access`
 
-Highlights survive VS Code restarts. Flagged line data is stored in `.magenta/files/` as JSON, with a debounced write (500ms) to avoid hammering disk. An `index.json` provides project-wide aggregate statistics.
+For audited files, Magenta writes open events to `.magenta/access-log.jsonl` and marks the file in the Explorer with an `A` badge. Events are labeled as either `user` or `programmatic` depending on whether the file opened visibly in an editor.
 
-### 🎨 Four Color Themes
+### Persistent metadata
 
-Magenta ships with four purpose-built dark themes:
-
-- **Magenta** — the default, balanced purple palette
-- **Magenta Noir** — deeper blacks, minimal color
-- **Magenta Contrast+** — higher contrast for accessibility
-- **Magenta Cyber** — neon-accented cyberpunk aesthetic
-
-### ♻️ Drift Correction
-
-Tracked line numbers shift correctly as you edit. Insert above a flagged block → it moves down. Delete inside → those flags are removed. No stale highlights.
-
----
+Magenta stores tracked line metadata under `.magenta/` so highlights survive reloads and restarts. It also maintains an aggregate index for workspace-level summaries.
 
 ## Commands
 
-| Command | Shortcut | Description |
-|---------|----------|-------------|
-| `Magenta: Show Summary` | Click status bar | Per-file AI% and Paste% breakdown |
-| `Magenta: Clear Highlights` | `Ctrl+Shift+Alt+C` | Remove all flags from the active file |
-| `Magenta: Audit file access` | Right-click in explorer | Start logging opens for a file |
-| `Magenta: Stop auditing file access` | Right-click in explorer | Stop logging opens for a file |
+| Command | Purpose |
+| --- | --- |
+| `Magenta: Clear Highlights` | Remove tracked flags from the active file |
+| `Magenta: Show Summary` | Show AI and paste counts for the active file |
+| `Magenta: Toggle Highlights` | Show or hide decorations |
+| `Magenta: Choose Highlight Theme` | Switch highlight presentation |
+| `Magenta: Audit file access` | Start auditing a file from the Explorer |
+| `Magenta: Stop auditing file access` | Remove a file from the audit list |
 
----
+## Settings
 
-## Getting Started
-
-1. **Install** from the VS Code Marketplace (or `Extensions → Install from VSIX` for local builds)
-2. **Open any file** and start coding
-3. **Paste AI-generated code** — watch it get highlighted with 🤖 or 📋 and see the percentage update in the status bar
-
-That's it. Magenta works immediately with zero configuration.
-
----
-
-## Configuration
-
-All settings are in VS Code's Settings UI under **Magenta**:
+Magenta contributes these settings:
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `magenta.flagSnippetsAsAI` | `false` | When enabled, snippet expansions (Emmet, VS Code built-ins) are flagged as AI-generated |
-| `magenta.pasteWindowMs` | `150` | Millisecond window after Ctrl+V during which change events are classified as paste |
-| `magenta.snippetWindowMs` | `150` | Millisecond window after snippet intercept for suppression |
+| --- | --- | --- |
+| `magenta.flagSnippetsAsAI` | `false` | Treat snippet insertions as AI-generated when they fall inside the snippet detection window |
+| `magenta.pasteWindowMs` | `150` | Time window after paste interception used to classify inserted content as paste |
+| `magenta.snippetWindowMs` | `150` | Time window after snippet interception used to suppress or classify snippet content |
 
-Changes take effect immediately — no reload needed.
+## How detection works
 
----
+Magenta is heuristic-based. It does not claim authorship with certainty. The current implementation combines:
 
-## What Magenta Doesn't Do
+- explicit paste interception through keybindings
+- clipboard matching for inserted content
+- a generated-code heuristic based on size, indentation consistency, trailing spaces, and character density
+- line-drift correction so tracked ranges move with edits
 
-Transparency builds trust. Here's what to know:
+This makes Magenta useful for visibility and auditing, but not a substitute for policy, review, or source attribution.
 
-- **Not an oracle.** Detection is heuristic-based — it looks at structural signals (consistent indentation, no trailing spaces, high character density) and size gates (≥5 lines or ≥200 characters). Fast typists may trigger false positives; small AI completions may be missed.
-- **No pre-existing code scanning.** Magenta is event-driven. Opening a file that already contains AI-generated code won't flag it retroactively.
-- **VS Code layer only.** The file access audit tracks opens through VS Code's document model. It does not monitor shell-level reads (`cat`, `less`, direct file access by other processes`).
-- **Single-file percentages.** Stats are per-file, not per-project or per-PR (project aggregate is available in `.magenta/index.json`).
+## Workspace files
 
----
+Magenta may create these files in the workspace:
 
-## Known Limitations
+- `.magenta/files/**/*.json` for per-file tracked lines
+- `.magenta/index.json` for aggregate workspace statistics
+- `.magenta/audited.json` for the audited file list
+- `.magenta/access-log.jsonl` for audit events
+- `.magenta/config.json` when custom ignore patterns are used
 
-- Heuristic accuracy varies by coding style — the detection layer is probabilistic, not ground-truth
-- File access audit does not detect reads by external processes outside VS Code
-- Multi-root workspaces use the first workspace folder for `.magenta/` storage
-
----
-
-## Roadmap
-
-- [ ] Shell monitoring pack — detect access outside VS Code
-- [ ] Git integration — annotate diffs with AI/paste flags
-- [ ] Per-project aggregate dashboard
-- [ ] Configurable detection rules
-- [ ] Export audit report (JSON / CSV)
-
----
-
-## Building from Source
+## Development
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/magenta.git
-cd magenta
 npm install
 npm run compile
 ```
 
-Press `F5` to launch the Extension Development Host.
+Useful scripts:
 
-### Build a VSIX
+- `npm run watch` for development builds
+- `npm run lint` for ESLint
+- `npm run check-types` for TypeScript validation
+- `npm test` for the VS Code test runner
 
-```bash
-npm install -g @vscode/vsce
-vsce package
-```
+Press `F5` in VS Code to launch an Extension Development Host.
 
-Install via `Extensions → ··· → Install from VSIX`.
+## Documentation
 
----
-
-## Contributing
-
-Pull requests welcome. Please open an issue before making large changes.
-
-```bash
-npm run compile   # type-check + lint + bundle
-npm run watch     # incremental rebuild
-```
-
----
+Additional project documentation lives in [`docs/FEATURES.md`](docs/FEATURES.md) and [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
 
 ## License
 
-MIT © Magenta Contributors
+MIT
