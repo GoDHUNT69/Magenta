@@ -14,3 +14,5 @@ Thumbs.db
 coverage/
 *.tsbuildinfo
 .eslintcache
+docs/task.md
+docs/auditlogs.md
